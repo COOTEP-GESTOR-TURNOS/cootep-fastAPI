@@ -1,6 +1,6 @@
 """Modelos (la M de MVC): contratos de entrada y salida. En JSON los campos van en camelCase."""
 
-from datetime import date
+from datetime import date, datetime
 from typing import Literal
 from uuid import UUID
 
@@ -50,16 +50,23 @@ class Estimacion(Esquema):
     p_preferencial: float | None
 
 
-class Indicadores(Esquema):
-    agencia_id: UUID
-    desde: date
-    hasta: date
+class ValoresIndicadores(Esquema):
     atendidos: int
     cancelados: int
     ausentes: int
     espera_promedio_min: float
     atencion_promedio_min: float
     proporcion_preferencial: float
+    solicitados: int | None = None
+    pendientes: int | None = None
+
+
+class Indicadores(ValoresIndicadores):
+    agencia_id: UUID
+    desde: date
+    hasta: date
+    fuente: Literal["REAL", "SIMULADA"] = "REAL"
+    actualizado_en: datetime | None = None
 
 
 class ResultadoEtl(Esquema):

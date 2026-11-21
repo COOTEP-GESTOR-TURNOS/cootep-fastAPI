@@ -51,15 +51,21 @@ async def indicadores(
     agencia_id: UUID = Query(alias="agenciaId"),
     desde: date = Query(),
     hasta: date = Query(),
+    servicio_id: UUID | None = Query(default=None, alias="servicioId"),
+    colaborador_id: UUID | None = Query(default=None, alias="colaboradorId"),
     repositorio: ClickHouseRepository = Depends(repositorio_clickhouse),
 ) -> Indicadores:
     if desde > hasta:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "desde no puede ser posterior a hasta")
-    valores = await repositorio.indicadores(agencia_id, desde, hasta)
+    valores = await repositorio.indicadores(agencia_id, desde, hasta, servicio_id=servicio_id, colaborador_id=colaborador_id)
     return Indicadores(agencia_id=agencia_id, desde=desde, hasta=hasta, **valores)
 
 
 @router.post("/etl/ejecutar", response_model=ResultadoEtl, tags=["etl"])
-async def ejecutar_etl(completa: bool = Query(default=False), servicio: EtlService = Depends(servicio_etl)) -> ResultadoEtl:
-    """Carga los eventos nuevos (o todos, con completa=true) de MongoDB a ClickHouse."""
-    return await servicio.ejecutar(completa)
+async def ejecutar_etl(
+    completa: bool = Query(default=False), reconstruir: bool = Query(default=False),
+    servicio: EtlService = Depends(servicio_etl),
+) -> ResultadoEtl:
+    """Carga los eventos nuevos (o todos, con completa=true) de MongoDB a ClickHouse.
+    Con reconstruir=true vacía antes hechos_turno: ClickHouse queda igual a MongoDB."""
+    return await servicio.ejecutar(completa, reconstruir)

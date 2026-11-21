@@ -11,9 +11,32 @@ from app.config import Configuracion
 
 COLUMNAS = (
     "turno_id, agencia_id, servicio_id, fecha, franja, dia_semana, tipo_dia, tipo_atencion, "
-    "canal, estado_final, espera_seg, atencion_seg, solicitado_en"
+    "canal, estado_final, espera_seg, atencion_seg, solicitado_en, colaborador_id"
 )
 TAMANO_LOTE = 50_000
+OpcionHistorica = tuple[UUID, UUID, UUID | None]
+
+def _filtros(servicio_id: UUID | None, colaborador_id: UUID | None) -> tuple[str, dict[str, str]]:
+    condiciones = []
+    parametros = {}
+    if servicio_id is not None:
+        condiciones.append(" AND servicio_id = {servicio:UUID}")
+        parametros["servicio"] = str(servicio_id)
+    if colaborador_id is not None:
+        condiciones.append(" AND colaborador_id = {colaborador:UUID}")
+        parametros["colaborador"] = str(colaborador_id)
+    return "".join(condiciones), parametros
+
+
+def _parametros_periodo(agencias: list[UUID], desde: date, hasta: date) -> dict[str, str]:
+    return {"agencias": ",".join(map(str, agencias)), "desde": desde.isoformat(), "hasta": hasta.isoformat()}
+
+
+def _opciones(filas: list[dict]) -> list[OpcionHistorica]:
+    return [
+        (UUID(fila["agencia_id"]), UUID(fila["servicio_id"]), UUID(fila["colaborador_id"]) if fila["colaborador_id"] else None)
+        for fila in filas
+    ]
 
 
 class ClickHouseRepository:
@@ -71,7 +94,11 @@ class ClickHouseRepository:
             "muestras": int(f["muestras"]),
         }
 
-    async def indicadores(self, agencia_id: UUID, desde: date, hasta: date) -> dict:
+    async def indicadores(
+        self, agencia_id: UUID, desde: date, hasta: date, servicio_id: UUID | None = None,
+        colaborador_id: UUID | None = None,
+    ) -> dict:
+        condiciones, parametros = _filtros(servicio_id, colaborador_id)
         filas = await self._consultar(
             """
             SELECT countIf(estado_final = 'ATENDIDO') AS atendidos,
@@ -82,8 +109,8 @@ class ClickHouseRepository:
                    ifNotFinite(round(avg(tipo_atencion = 'PREFERENCIAL'), 3), 0) AS proporcion_preferencial
             FROM cootep.hechos_turno FINAL
             WHERE agencia_id = {agencia:UUID} AND fecha BETWEEN {desde:Date} AND {hasta:Date}
-            """,
-            {"agencia": str(agencia_id), "desde": desde.isoformat(), "hasta": hasta.isoformat()},
+            """ + condiciones,
+            {"agencia": str(agencia_id), "desde": desde.isoformat(), "hasta": hasta.isoformat(), **parametros},
         )
         f = filas[0]
         return {
@@ -94,6 +121,30 @@ class ClickHouseRepository:
             "atencion_promedio_min": float(f["atencion_promedio_min"]),
             "proporcion_preferencial": float(f["proporcion_preferencial"]),
         }
+
+    async def opciones_historicas(
+        self, agencias: list[UUID], desde: date, hasta: date, servicio_id: UUID | None = None,
+    ) -> list[OpcionHistorica]:
+        if not agencias or desde > hasta:
+            return []
+        condiciones, parametros = _filtros(servicio_id, None)
+        filas = await self._consultar(
+            """
+            SELECT DISTINCT agencia_id, servicio_id, colaborador_id
+            FROM cootep.hechos_turno FINAL
+            WHERE has(splitByChar(',', {agencias:String}), toString(agencia_id))
+              AND fecha BETWEEN {desde:Date} AND {hasta:Date}
+            """ + condiciones,
+            {**_parametros_periodo(agencias, desde, hasta), **parametros},
+        )
+        return _opciones(filas)
+
+    async def preparar_responsables(self) -> None:
+        respuesta = await self._cliente.post(
+            "/", content="ALTER TABLE cootep.hechos_turno ADD COLUMN IF NOT EXISTS colaborador_id Nullable(UUID)",
+            headers=self._cabeceras,
+        )
+        respuesta.raise_for_status()
 
     async def insertar_hechos(self, hechos: list[dict]) -> int:
         """Inserta en lotes con JSONEachRow. ReplacingMergeTree reemplaza los turnos repetidos."""
@@ -107,3 +158,8 @@ class ClickHouseRepository:
             )
             respuesta.raise_for_status()
         return len(hechos)
+
+    async def vaciar_hechos(self) -> None:
+        """ClickHouse es una copia analítica de MongoDB: tras limpiar la demostración se vacía y se recarga."""
+        respuesta = await self._cliente.post("/", content="TRUNCATE TABLE IF EXISTS cootep.hechos_turno", headers=self._cabeceras)
+        respuesta.raise_for_status()

@@ -23,9 +23,12 @@ class EtlService:
         self._pool = pool
         self._procesos = procesos
 
-    async def ejecutar(self, completa: bool = False) -> ResultadoEtl:
+    async def ejecutar(self, completa: bool = False, reconstruir: bool = False) -> ResultadoEtl:
+        """`reconstruir` vacía hechos_turno antes de la carga completa: quita lo que ya no está en MongoDB
+        (por ejemplo, después de limpiar la demostración)."""
         inicio = time.perf_counter()
         hasta = datetime.now(timezone.utc)
+        completa = completa or reconstruir
         desde = None if completa else await self._eventos.ultima_marca()
 
         por_fila = await self._eventos.eventos_por_fila(desde)
@@ -34,6 +37,9 @@ class EtlService:
             *(bucle.run_in_executor(self._pool, construir_hechos, lote) for lote in por_fila.items())
         )
         hechos = [hecho for lote in resultados for hecho in lote]
+        await self._clickhouse.preparar_responsables()
+        if reconstruir:
+            await self._clickhouse.vaciar_hechos()
         cargados = await self._clickhouse.insertar_hechos(hechos)
         await self._eventos.guardar_marca(hasta)
 
