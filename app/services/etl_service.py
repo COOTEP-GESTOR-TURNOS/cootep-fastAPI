@@ -34,6 +34,7 @@ class EtlService:
             *(bucle.run_in_executor(self._pool, construir_hechos, lote) for lote in por_fila.items())
         )
         hechos = [hecho for lote in resultados for hecho in lote]
+        await self._clickhouse.preparar_responsables()
         cargados = await self._clickhouse.insertar_hechos(hechos)
         await self._eventos.guardar_marca(hasta)
 

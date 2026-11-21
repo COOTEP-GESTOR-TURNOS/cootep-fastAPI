@@ -22,6 +22,7 @@ class Configuracion(BaseSettings):
     procesos_estadisticas: int = 4
     # Turnos atendidos mínimos para confiar en la estadística de una franja.
     min_muestras_franja: int = 20
+    demanda_demo: bool = False
 
 
 @lru_cache

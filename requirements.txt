@@ -5,3 +5,5 @@ pydantic==2.10.4
 pydantic-settings==2.7.1
 httpx==0.28.1
 motor==3.6.0
+holidays==0.109
+scikit-learn==1.7.2

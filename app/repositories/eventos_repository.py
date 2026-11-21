@@ -9,8 +9,17 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.services.hechos import EventoCompacto
 
 PROYECCION = {"_id": 0, "turnoId": 1, "agenciaId": 1, "servicioId": 1, "estadoNuevo": 1, "ocurridoEn": 1,
-              "tipoAtencion": 1, "canal": 1}
+              "tipoAtencion": 1, "canal": 1, "tipo": 1, "actorId": 1}
 MARCA = "hechos_turno"
+
+
+def compactar_evento(evento: dict) -> EventoCompacto:
+    return (
+        sys.intern(evento["turnoId"]), evento["estadoNuevo"],
+        evento["ocurridoEn"].replace(tzinfo=timezone.utc).timestamp(),
+        evento.get("tipoAtencion", "GENERAL"), evento.get("canal", "WEB"),
+        evento.get("tipo"), evento.get("actorId"),
+    )
 
 
 class EventosRepository:
@@ -28,15 +37,7 @@ class EventosRepository:
         grupos: dict[tuple[str, str], list[EventoCompacto]] = defaultdict(list)
         async for e in self._eventos.find(filtro, PROYECCION, batch_size=5000):
             clave = (sys.intern(e["agenciaId"]), sys.intern(e["servicioId"]))
-            grupos[clave].append(
-                (
-                    sys.intern(e["turnoId"]),
-                    e["estadoNuevo"],
-                    e["ocurridoEn"].replace(tzinfo=timezone.utc).timestamp(),
-                    e.get("tipoAtencion", "GENERAL"),
-                    e.get("canal", "WEB"),
-                )
-            )
+            grupos[clave].append(compactar_evento(e))
         return grupos
 
     async def ultima_marca(self) -> datetime | None:

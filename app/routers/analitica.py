@@ -5,12 +5,13 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from app.dependencias import repositorio_clickhouse, servicio_estimacion, servicio_etl, servicio_recomendacion
+from app.dependencias import proyeccion_demo_activa, repositorio_clickhouse, servicio_estimacion, servicio_etl, servicio_recomendacion
 from app.repositories.clickhouse_repository import ClickHouseRepository
 from app.schemas import Estimacion, Indicadores, ParametrosEspera, Recomendacion, ResultadoEtl, SolicitudEstimacion
 from app.seguridad import verificar_token_servicio
 from app.services.estimacion_service import EstimacionService
 from app.services.etl_service import EtlService
+from app.services.proyeccion_demo import ProyeccionDemo
 from app.services.recomendacion_service import RecomendacionService
 
 router = APIRouter(prefix="/api/v1", dependencies=[Depends(verificar_token_servicio)])
@@ -51,11 +52,21 @@ async def indicadores(
     agencia_id: UUID = Query(alias="agenciaId"),
     desde: date = Query(),
     hasta: date = Query(),
+    servicio_id: UUID | None = Query(default=None, alias="servicioId"),
+    colaborador_id: UUID | None = Query(default=None, alias="colaboradorId"),
     repositorio: ClickHouseRepository = Depends(repositorio_clickhouse),
+    demo: ProyeccionDemo | None = Depends(proyeccion_demo_activa),
 ) -> Indicadores:
     if desde > hasta:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "desde no puede ser posterior a hasta")
-    valores = await repositorio.indicadores(agencia_id, desde, hasta)
+    if demo:
+        instantanea = await demo.leer([agencia_id], desde, hasta, servicio_id=servicio_id, colaborador_id=colaborador_id)
+        if instantanea.corte is None:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Todavía no hay un corte de demostración publicado")
+        valores = instantanea.total(agencia_id, desde, hasta).valores()
+        return Indicadores(agencia_id=agencia_id, desde=desde, hasta=hasta, fuente="SIMULADA",
+                           actualizado_en=instantanea.corte.actualizado_en, **valores.model_dump())
+    valores = await repositorio.indicadores(agencia_id, desde, hasta, servicio_id=servicio_id, colaborador_id=colaborador_id)
     return Indicadores(agencia_id=agencia_id, desde=desde, hasta=hasta, **valores)
 
 
