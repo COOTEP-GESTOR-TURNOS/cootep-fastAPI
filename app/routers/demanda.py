@@ -1,19 +1,18 @@
 """API interna de demanda. NestJS valida el acceso del usuario a la agencia."""
 
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pymongo.errors import DuplicateKeyError, PyMongoError
 
 from app.config import ZONA_AGENCIAS
-from app.dependencias import proyeccion_demo_activa, repositorio_demanda, servicio_demanda
+from app.dependencias import repositorio_demanda, servicio_demanda
 from app.repositories.demanda_repository import DemandaRepository
 from app.schemas_demanda import CalendarioDemanda, CambiosEvento, EventoAgencia, NuevoEvento
 from app.seguridad import verificar_token_servicio
-from app.services.demanda_service import DIAS_ENTRENAMIENTO, DemandaService, fechas_mes
-from app.services.proyeccion_demo import ProyeccionDemo
+from app.services.demanda_service import DemandaService
 
 router = APIRouter(
     prefix="/api/v1/analitica/agencias/{agencia_id}", tags=["demanda"],
@@ -41,17 +40,12 @@ async def calendario(
     servicio_id: UUID | None = Query(default=None, alias="servicioId"),
     servicio_activo: bool = Query(default=True, alias="servicioActivo"),
     servicio: DemandaService = Depends(servicio_demanda),
-    demo: ProyeccionDemo | None = Depends(proyeccion_demo_activa),
 ) -> CalendarioDemanda:
     if mes.startswith("0000"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Año inválido")
     with _traducir_errores_mongo():
-        hoy = datetime.now(ZONA_AGENCIAS).date()
-        instantanea = await demo.leer(
-            [agencia_id], min(fechas_mes(mes)[0], hoy - timedelta(days=DIAS_ENTRENAMIENTO)), hoy, servicio_id=servicio_id,
-        ) if demo else None
         return await servicio.calendario(
-            agencia_id, mes, departamento, municipio, hoy=hoy, instantanea_demo=instantanea, activa=activa,
+            agencia_id, mes, departamento, municipio, hoy=datetime.now(ZONA_AGENCIAS).date(), activa=activa,
             servicio_id=servicio_id, servicio_activo=servicio_activo,
         )
 

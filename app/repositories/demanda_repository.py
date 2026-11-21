@@ -8,7 +8,11 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import ReturnDocument
 
 from app.config import ZONA_AGENCIAS
-from app.schemas_demanda import CambiosEvento, EventoAgencia, NuevoEvento
+from app.schemas_demanda import CambiosEvento, EventoAgencia, FuenteDemanda, NuevoEvento
+
+# Los datos de demostración viven en las mismas colecciones que los reales, con esta marca:
+# así se pueden reconocer en pantalla y borrar con `demo.ps1 limpiar`.
+ORIGEN_SIMULADO = "SIMULADO"
 
 
 def _medianoche_utc(fecha: date) -> datetime:
@@ -22,9 +26,29 @@ def _fecha_bogota(instante: datetime) -> date:
 
 
 class DemandaRepository:
-    def __init__(self, db: AsyncIOMotorDatabase, demo: bool) -> None:
+    def __init__(self, db: AsyncIOMotorDatabase) -> None:
         self._solicitudes = db["eventos_turno"]
-        self._eventos = db["eventos_agencia_demo" if demo else "eventos_agencia"]
+        self._eventos = db["eventos_agencia"]
+
+    async def preparar_indices(self) -> None:
+        """Se ejecuta al arrancar: los volúmenes ya inicializados también reciben los índices."""
+        await self._solicitudes.create_index(
+            [("agenciaId", 1), ("estadoNuevo", 1), ("ocurridoEn", 1)], name="ix_agencia_estado_tiempo")
+        await self._solicitudes.create_index(
+            [("agenciaId", 1), ("estadoNuevo", 1), ("servicioId", 1), ("ocurridoEn", 1)],
+            name="ix_agencia_estado_servicio_tiempo")
+        await self._solicitudes.create_index(
+            [("origen", 1), ("agenciaId", 1)], name="ix_origen_agencia",
+            partialFilterExpression={"origen": {"$exists": True}})
+        await self._eventos.create_index(
+            [("agenciaId", 1), ("fecha", 1), ("tipo", 1)], unique=True, name="ux_agencia_fecha_tipo")
+        await self._eventos.create_index([("agenciaId", 1), ("id", 1)], unique=True, name="ux_agencia_evento")
+
+    async def fuente(self, agencia_id: UUID) -> FuenteDemanda:
+        """SIMULADA si la agencia tiene turnos generados por la demostración."""
+        simulado = await self._solicitudes.find_one(
+            {"origen": ORIGEN_SIMULADO, "agenciaId": str(agencia_id)}, {"_id": 1})
+        return "SIMULADA" if simulado else "REAL"
 
     async def primer_dia(self, agencia_id: UUID, hasta: date, servicio_id: UUID | None = None) -> date | None:
         """Primera fecha registrada antes del límite exclusivo."""
@@ -38,7 +62,7 @@ class DemandaRepository:
         return _fecha_bogota(registro["ocurridoEn"]) if registro else None
 
     async def historial(self, agencia_id: UUID, desde: date, hasta: date, servicio_id: UUID | None = None) -> dict[date, int]:
-        """Conteos desde inclusive hasta exclusivo. En producción se cuenta cada turno una vez."""
+        """Conteos desde inclusive hasta exclusivo. Cada turno se cuenta una vez."""
         filtro = {
             "agenciaId": str(agencia_id), "estadoNuevo": "SOLICITADO",
             "ocurridoEn": {"$gte": _medianoche_utc(desde), "$lt": _medianoche_utc(hasta)},

@@ -22,7 +22,10 @@ class Configuracion(BaseSettings):
     procesos_estadisticas: int = 4
     # Turnos atendidos mínimos para confiar en la estadística de una franja.
     min_muestras_franja: int = 20
-    demanda_demo: bool = False
+    # Carga incremental MongoDB → ClickHouse en segundo plano; 0 la apaga.
+    etl_intervalo_seg: int = 60
+    # El generador de datos de demostración se niega a correr salvo con ENTORNO=desarrollo.
+    entorno: str = "produccion"
 
 
 @lru_cache

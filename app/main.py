@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager, suppress
 
@@ -10,13 +11,37 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo.errors import PyMongoError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.config import configuracion
+from app.config import Configuracion, configuracion
 from app.repositories.clickhouse_repository import ClickHouseRepository
 from app.repositories.demanda_repository import DemandaRepository
-from app.repositories.eventos_demo_repository import EventosDemoRepository
 from app.repositories.eventos_repository import EventosRepository
 from app.routers import analitica, demanda, salud, tablero
-from app.services.proyeccion_demo import ProyeccionDemo
+from app.services.etl_service import EtlService
+
+logger = logging.getLogger(__name__)
+
+
+async def mantenimiento(app: FastAPI, cfg: Configuracion) -> None:
+    """Prepara índices y columnas, y mantiene ClickHouse al día con una carga incremental.
+
+    Los volúmenes ya inicializados no vuelven a correr los scripts de infra/init: por eso los
+    índices de MongoDB y la columna colaborador_id se aseguran aquí, al arrancar (son idempotentes).
+    Corre en segundo plano para que el servicio arranque aunque un motor tarde en estar listo.
+    """
+    preparado = False
+    while True:
+        try:
+            if not preparado:
+                await app.state.demanda.preparar_indices()
+                await app.state.clickhouse.preparar_responsables()
+                preparado = True
+            if cfg.etl_intervalo_seg > 0:
+                await EtlService(app.state.eventos, app.state.clickhouse, app.state.pool, cfg.procesos_estadisticas).ejecutar()
+        except Exception:
+            logger.exception("Mantenimiento de la analítica: se reintenta en el siguiente ciclo")
+        if preparado and cfg.etl_intervalo_seg <= 0:
+            return
+        await asyncio.sleep(cfg.etl_intervalo_seg if cfg.etl_intervalo_seg > 0 else 15)
 
 
 @asynccontextmanager
@@ -28,16 +53,14 @@ async def ciclo_de_vida(app: FastAPI):
     app.state.pool = ProcessPoolExecutor(max_workers=cfg.procesos_estadisticas)
     app.state.clickhouse = ClickHouseRepository(cliente_http, cfg)
     app.state.eventos = EventosRepository(mongo[cfg.mongo_db])
-    app.state.demanda = DemandaRepository(mongo[cfg.mongo_db], cfg.demanda_demo)
-    app.state.proyeccion_demo = ProyeccionDemo(EventosDemoRepository(mongo[cfg.mongo_db]), app.state.clickhouse, app.state.pool)
-    tarea = asyncio.create_task(app.state.proyeccion_demo.ejecutar_en_segundo_plano()) if cfg.demanda_demo else None
+    app.state.demanda = DemandaRepository(mongo[cfg.mongo_db])
+    tarea = asyncio.create_task(mantenimiento(app, cfg))
     try:
         yield
     finally:
-        if tarea:
-            tarea.cancel()
-            with suppress(asyncio.CancelledError):
-                await tarea
+        tarea.cancel()
+        with suppress(asyncio.CancelledError):
+            await tarea
         await cliente_http.aclose()
         mongo.close()
         app.state.pool.shutdown(wait=True, cancel_futures=True)

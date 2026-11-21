@@ -7,10 +7,9 @@ from uuid import UUID
 
 from app.config import ZONA_AGENCIAS
 from app.repositories.demanda_repository import DemandaRepository
-from app.schemas_demanda import CalendarioDemanda, DiaDemanda, EstadoPronostico, FuenteDemanda
+from app.schemas_demanda import CalendarioDemanda, DiaDemanda, EstadoPronostico
 from app.services.calendario_demanda import cierre_calendario, marcas_calendario
 from app.services.modelo_demanda import entrenar, nivel_demanda, pronosticar, umbrales_demanda
-from app.services.resumen_demo import InstantaneaDemo
 
 DIAS_ENTRENAMIENTO = 365
 DIAS_PRONOSTICO = 90
@@ -28,14 +27,26 @@ def fechas_mes(mes: str) -> list[date]:
 
 
 class DemandaService:
-    def __init__(self, repositorio: DemandaRepository, demo: bool) -> None:
+    """Lee el historial de `eventos_turno` (reales y simulados por igual) y pronostica los días hábiles."""
+
+    def __init__(self, repositorio: DemandaRepository) -> None:
         self._repositorio = repositorio
-        self._fuente: FuenteDemanda = "SIMULADA" if demo else "REAL"
+
+    async def totales_diarios(
+        self, agencias: list[UUID], desde: date, hasta: date, servicio_id: UUID | None = None,
+    ) -> dict[date, int]:
+        """Turnos pedidos por día sumando las agencias (hasta exclusivo)."""
+        totales: dict[date, int] = {}
+        for historial in await asyncio.gather(*(
+            self._repositorio.historial(agencia, desde, hasta, servicio_id) for agencia in agencias
+        )):
+            for fecha, conteo in historial.items():
+                totales[fecha] = totales.get(fecha, 0) + conteo
+        return totales
 
     async def calendario(
         self, agencia_id: UUID, mes: str, departamento: str | None, municipio: str | None, *, hoy: date | None = None,
-        instantanea_demo: InstantaneaDemo | None = None, activa: bool = True,
-        servicio_id: UUID | None = None, servicio_activo: bool = True,
+        activa: bool = True, servicio_id: UUID | None = None, servicio_activo: bool = True,
     ) -> CalendarioDemanda:
         hoy = hoy or datetime.now(ZONA_AGENCIAS).date()
         fechas = fechas_mes(mes)
@@ -44,25 +55,21 @@ class DemandaService:
         inicio_entrenamiento = hoy - timedelta(days=DIAS_ENTRENAMIENTO)
 
         desde_eventos = min(fechas[0], inicio_entrenamiento) if horizonte else fechas[0]
-        hasta_eventos = fechas[-1]
-        lectura_eventos = self._repositorio.eventos(agencia_id, desde_eventos, hasta_eventos)
+        lectura_eventos = self._repositorio.eventos(agencia_id, desde_eventos, fechas[-1])
+        lectura_fuente = self._repositorio.fuente(agencia_id)
         primer_dia = None
         historial: dict[date, int] = {}
-        if self._fuente == "SIMULADA":
-            eventos = await lectura_eventos
-            if instantanea_demo:
-                historial = {fecha: total.solicitados for fecha, total in instantanea_demo.diarios.get(agencia_id, {}).items()}
-        elif horizonte or observables:
+        if horizonte or observables:
             desde_historial = inicio_entrenamiento if horizonte else observables[0]
             hasta_historial = min(hoy, fechas[-1]) + timedelta(days=1)
-            fin_observacion = hoy + timedelta(days=1)
-            eventos, historial, primer_dia = await asyncio.gather(
+            eventos, fuente, historial, primer_dia = await asyncio.gather(
                 lectura_eventos,
+                lectura_fuente,
                 self._repositorio.historial(agencia_id, desde_historial, hasta_historial, servicio_id),
-                self._repositorio.primer_dia(agencia_id, fin_observacion, servicio_id),
+                self._repositorio.primer_dia(agencia_id, hoy + timedelta(days=1), servicio_id),
             )
         else:
-            eventos = await lectura_eventos
+            eventos, fuente = await asyncio.gather(lectura_eventos, lectura_fuente)
 
         tipos = {fecha: {evento.tipo for evento in registros} for fecha, registros in eventos.items()}
         marcas_por_fecha = {fecha: marcas_calendario(fecha, departamento, municipio) for fecha in fechas}
@@ -76,16 +83,19 @@ class DemandaService:
         umbrales: tuple[float, float] | None = None
 
         def fecha_registrada(fecha: date) -> bool:
-            if self._fuente == "SIMULADA":
-                return bool(instantanea_demo and fecha <= hoy and (fecha in historial or instantanea_demo.cubre(fecha)))
             return primer_dia is not None and primer_dia <= fecha <= hoy
 
         if predecibles:
             serie = {fecha: historial.get(fecha, 0) for fecha in _rango(inicio_entrenamiento, hoy) if fecha_registrada(fecha)}
-            positivos = [conteo for conteo in serie.values() if conteo > 0]
+            # El modelo solo aprende de los días que la agencia atendió.
+            serie_habil = {
+                fecha: total for fecha, total in serie.items()
+                if not cierre_calendario(marcas_calendario(fecha, departamento, municipio), tipos.get(fecha, ()))
+            }
+            positivos = [conteo for conteo in serie_habil.values() if conteo > 0]
             if len(serie) >= MIN_COBERTURA and len(positivos) >= MIN_DIAS_POSITIVOS:
-                modelo = await asyncio.to_thread(entrenar, serie, tipos, departamento, municipio)
-                estimaciones = await asyncio.to_thread(pronosticar, modelo, predecibles, tipos, departamento, municipio)
+                modelo = await asyncio.to_thread(entrenar, serie_habil, tipos)
+                estimaciones = await asyncio.to_thread(pronosticar, modelo, predecibles, tipos)
                 umbrales = umbrales_demanda(positivos)
                 estado = "DISPONIBLE"
         dias = []
@@ -104,4 +114,4 @@ class DemandaService:
                 turnos_estimados=estimacion,
                 nivel_demanda=nivel_demanda(estimacion, umbrales or (0, 0)) if estimacion is not None else None,
             ))
-        return CalendarioDemanda(agencia_id=agencia_id, mes=mes, fuente=self._fuente, estado_pronostico=estado, dias=dias)
+        return CalendarioDemanda(agencia_id=agencia_id, mes=mes, fuente=fuente, estado_pronostico=estado, dias=dias)

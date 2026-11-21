@@ -16,7 +16,6 @@ from app.schemas_demanda import EventoAgencia
 from app.services.calendario_demanda import marcas_calendario
 from app.services.demanda_service import DemandaService
 from app.services.modelo_demanda import nivel_demanda
-from app.services.resumen_demo import CorteDemo, InstantaneaDemo, TotalesDia
 
 AGENCIA = UUID("a0000000-0000-4000-8000-000000000001")
 EVENTO = UUID("b0000000-0000-4000-8000-000000000001")
@@ -24,10 +23,14 @@ API = f"/api/v1/analitica/agencias/{AGENCIA}"
 
 
 class RepositorioFalso:
-    def __init__(self, historial, eventos=None):
+    def __init__(self, historial, eventos=None, origen="REAL"):
         self.datos = historial
         self.eventos_por_fecha = eventos or {}
+        self.origen = origen
         self.rangos = []
+
+    async def fuente(self, agencia_id):
+        return self.origen
 
     async def primer_dia(self, agencia_id, hasta, servicio_id=None):
         return min((fecha for fecha in self.datos if fecha < hasta), default=None)
@@ -44,7 +47,7 @@ def test_mes_pasado_exhibe_historial_anterior_a_la_ventana_de_entrenamiento():
     fecha_evento = date(2024, 2, 5)
     evento = EventoAgencia(id=EVENTO, fecha=fecha_evento, tipo="PAGO_NOMINA")
     repo = RepositorioFalso({fecha_evento: 12}, {fecha_evento: [evento]})
-    servicio = DemandaService(repo, demo=False)
+    servicio = DemandaService(repo)
     resultado = asyncio.run(servicio.calendario(AGENCIA, "2024-02", None, None, hoy=date(2026, 1, 15)))
 
     assert resultado.estado_pronostico == "SOLO_CALENDARIO"
@@ -62,7 +65,7 @@ def test_pronostica_desde_hoy_y_termina_el_dia_90():
     hoy = date(2026, 1, 2)
     datos = {hoy - timedelta(days=dia): 30 + dia % 7 for dia in range(1, 80)}
     repo = RepositorioFalso({**datos, hoy: 1_000})
-    servicio = DemandaService(repo, demo=False)
+    servicio = DemandaService(repo)
     actual = asyncio.run(servicio.calendario(AGENCIA, "2026-01", None, None, hoy=hoy))
     final = asyncio.run(servicio.calendario(AGENCIA, "2026-04", None, None, hoy=hoy))
 
@@ -79,21 +82,18 @@ def test_pronostica_desde_hoy_y_termina_el_dia_90():
     assert repo.rangos == [(hoy - timedelta(days=365), hoy + timedelta(days=1))] * 2
 
 
-@pytest.mark.parametrize("demo", [False, True])
-def test_dias_no_habiles_preservan_registros_y_omiten_pronosticos(demo):
+def test_dias_no_habiles_preservan_registros_y_omiten_pronosticos():
     hoy = date(2026, 10, 1)
     cierre_local = date(2026, 10, 5)
     datos = {hoy - timedelta(days=dia): 25 + dia % 7 for dia in range(1, 85)}
     datos[date(2026, 9, 27)] = 14  # domingo histórico
     evento = EventoAgencia(id=EVENTO, fecha=cierre_local, tipo="FESTIVO_LOCAL")
-    servicio = DemandaService(RepositorioFalso(datos, {cierre_local: [evento]}), demo=demo)
-    corte = CorteDemo(str(EVENTO), 2, datetime(2026, 10, 1, tzinfo=timezone.utc), ((min(datos), hoy),))
-    instantanea = InstantaneaDemo(corte, {AGENCIA: {fecha: TotalesDia(atendidos=total) for fecha, total in datos.items()}})
+    servicio = DemandaService(RepositorioFalso(datos, {cierre_local: [evento]}))
 
-    septiembre = asyncio.run(servicio.calendario(AGENCIA, "2026-09", "PUTUMAYO", "Mocoa", hoy=hoy, instantanea_demo=instantanea))
-    octubre = asyncio.run(servicio.calendario(AGENCIA, "2026-10", "PUTUMAYO", "Mocoa", hoy=hoy, instantanea_demo=instantanea))
+    septiembre = asyncio.run(servicio.calendario(AGENCIA, "2026-09", "PUTUMAYO", "Mocoa", hoy=hoy))
+    octubre = asyncio.run(servicio.calendario(AGENCIA, "2026-10", "PUTUMAYO", "Mocoa", hoy=hoy))
     inactivo = asyncio.run(servicio.calendario(AGENCIA, "2026-10", "PUTUMAYO", "Mocoa", hoy=hoy,
-                                               instantanea_demo=instantanea, servicio_id=EVENTO, servicio_activo=False))
+                                               servicio_id=EVENTO, servicio_activo=False))
 
     domingo = septiembre.dias[26]
     assert not domingo.dia_habil and domingo.turnos_registrados == 14
@@ -109,7 +109,7 @@ def test_dias_no_habiles_preservan_registros_y_omiten_pronosticos(demo):
 def test_historial_insuficiente_preserva_conteos_y_marcas():
     hoy = date(2026, 7, 10)
     repo = RepositorioFalso({date(2026, 7, 8): 8})
-    servicio = DemandaService(repo, demo=False)
+    servicio = DemandaService(repo)
     resultado = asyncio.run(servicio.calendario(AGENCIA, "2026-07", "PUTUMAYO", "Mocoa", hoy=hoy))
 
     assert resultado.estado_pronostico == "HISTORIAL_INSUFICIENTE"
@@ -158,11 +158,38 @@ def test_agregacion_cuenta_solicitudes_distintas_y_usa_medianoche_bogota():
 
             return registros()
 
-    repo = DemandaRepository({"eventos_turno": Coleccion(), "eventos_agencia": None}, demo=False)
+    repo = DemandaRepository({"eventos_turno": Coleccion(), "eventos_agencia": None})
     conteos = asyncio.run(repo.historial(AGENCIA, date(2026, 7, 8), date(2026, 7, 9), EVENTO))
     assert conteos == {date(2026, 7, 8): 1}
     assert _fecha_bogota(datetime(2026, 7, 9, 4, 59)) == date(2026, 7, 8)
     assert _fecha_bogota(_medianoche_utc(date(2026, 7, 9))) == date(2026, 7, 9)
+
+
+def test_la_fuente_es_simulada_si_la_agencia_tiene_datos_de_demostracion():
+    hoy = date(2026, 10, 1)
+    datos = {hoy - timedelta(days=dia): 25 for dia in range(1, 85)}
+    simulado = asyncio.run(DemandaService(RepositorioFalso(datos, origen="SIMULADA")).calendario(
+        AGENCIA, "2026-10", "PUTUMAYO", "Mocoa", hoy=hoy))
+    real = asyncio.run(DemandaService(RepositorioFalso(datos)).calendario(AGENCIA, "2026-10", "PUTUMAYO", "Mocoa", hoy=hoy))
+    assert (simulado.fuente, real.fuente) == ("SIMULADA", "REAL")
+    assert simulado.dias == real.dias  # los simulados se leen igual que los reales
+
+
+def test_el_repositorio_reconoce_la_marca_de_origen():
+    class Coleccion:
+        def __init__(self, documento):
+            self.documento = documento
+            self.filtros = []
+
+        async def find_one(self, filtro, proyeccion=None):
+            self.filtros.append(filtro)
+            return self.documento
+
+    con_demo = Coleccion({"_id": 1})
+    assert asyncio.run(DemandaRepository({"eventos_turno": con_demo, "eventos_agencia": None}).fuente(AGENCIA)) == "SIMULADA"
+    assert con_demo.filtros == [{"origen": "SIMULADO", "agenciaId": str(AGENCIA)}]
+    sin_demo = DemandaRepository({"eventos_turno": Coleccion(None), "eventos_agencia": None})
+    assert asyncio.run(sin_demo.fuente(AGENCIA)) == "REAL"
 
 
 def test_api_demanda_valida_token_formatos_y_errores_de_eventos(monkeypatch):
@@ -182,7 +209,7 @@ def test_api_demanda_valida_token_formatos_y_errores_de_eventos(monkeypatch):
     configuracion.cache_clear()
     repo = RepositorioEventosFalso({})
     app.dependency_overrides[repositorio_demanda] = lambda: repo
-    app.dependency_overrides[servicio_demanda] = lambda: DemandaService(repo, demo=False)
+    app.dependency_overrides[servicio_demanda] = lambda: DemandaService(repo)
     cliente = TestClient(app)
     headers = {"X-Service-Token": "token-demanda"}
     evento = {"fecha": "2026-07-13", "tipo": "FESTIVO_LOCAL"}

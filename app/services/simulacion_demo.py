@@ -9,6 +9,7 @@ from uuid import UUID, uuid5
 from pydantic import BaseModel
 
 from app.config import ZONA_AGENCIAS
+from app.repositories.demanda_repository import ORIGEN_SIMULADO
 from app.schemas_demanda import TipoEvento
 from app.services.calendario_demanda import cierre_calendario, marcas_calendario
 from app.services.simulacion import NOMBRES, PROB_AUSENTE, PROB_CANCELA, PROPORCION_PREFERENCIAL
@@ -69,7 +70,7 @@ def programar_eventos(catalogo: CatalogoDemo, desde: date, hasta: date) -> Itera
             for tipo, dia in programacion.items():
                 if fecha.day == dia:
                     yield {
-                        "agenciaId": agencia.id, "fecha": fecha.isoformat(), "tipo": tipo,
+                        "agenciaId": agencia.id, "fecha": fecha.isoformat(), "tipo": tipo, "origen": ORIGEN_SIMULADO,
                         "id": str(uuid5(ESPACIO_DEMO, f"evento:{agencia.id}:{fecha}:{tipo}")),
                     }
 
@@ -91,18 +92,28 @@ def selecciones_pendientes(catalogo: CatalogoDemo, ahora: datetime, eventos: Map
     return {"fecha": hoy.isoformat(), "agencias": abiertas}
 
 
-def simular_jornada(agencia: AgenciaDemo, fecha: date, semilla: int, tipos: Collection[str]) -> Iterator[dict]:
-    servicios = [servicio for servicio in agencia.servicios if servicio.activa and servicio.apertura < servicio.cierre]
-    if not servicios or jornada_cerrada(agencia, fecha, tipos):
-        return
+def volumen_esperado(agencia: AgenciaDemo, fecha: date, semilla: int, tipos: Collection[str]) -> float:
+    """Turnos que se esperan en un día hábil: la media de la que el simulador saca cada jornada.
 
-    rng = Random(f"turnos:{semilla}:{agencia.id}:{fecha}")
+    Lunes y viernes más pesados, más demanda cerca de los vencimientos del 5 y el 10, y los pagos
+    de subsidio (×1,45) y de nómina (×1,35) registrados como eventos de la agencia.
+    """
     marcas = marcas_calendario(fecha, agencia.departamento, agencia.municipio)
     volumen = Random(f"volumen:{semilla}:{agencia.id}").uniform(18, 34)
     volumen *= (1.2, 1.0, 1.0, 1.05, 1.1)[fecha.weekday()]
     volumen *= 1 + 0.12 * marcas.cercania_5 + 0.10 * marcas.cercania_10
     volumen *= 1.45 if "PAGO_SUBSIDIO_FAMILIAR" in tipos else 1
     volumen *= 1.35 if "PAGO_NOMINA" in tipos else 1
+    return volumen
+
+
+def simular_jornada(agencia: AgenciaDemo, fecha: date, semilla: int, tipos: Collection[str]) -> Iterator[dict]:
+    servicios = [servicio for servicio in agencia.servicios if servicio.activa and servicio.apertura < servicio.cierre]
+    if not servicios or jornada_cerrada(agencia, fecha, tipos):
+        return
+
+    rng = Random(f"turnos:{semilla}:{agencia.id}:{fecha}")
+    volumen = volumen_esperado(agencia, fecha, semilla, tipos)
     cantidad = max(1, round(rng.normalvariate(volumen, volumen ** 0.5)))
     asociados = rng.sample(agencia.asociados, min(cantidad, len(agencia.asociados)))
     servicios_elegidos = rng.choices(servicios, [PESO_SERVICIO.get(servicio.codigo, 1) for servicio in servicios], k=len(asociados))
