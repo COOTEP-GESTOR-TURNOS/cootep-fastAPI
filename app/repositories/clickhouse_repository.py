@@ -77,9 +77,9 @@ class ClickHouseRepository:
     async def parametros_franja(self, agencia_id: UUID, servicio_id: UUID, franja: str) -> dict | None:
         filas = await self._consultar(
             """
-            SELECT quantileExactIf(0.5)(atencion_seg, estado_final = 'ATENDIDO') AS atencion_mediana_seg,
+            SELECT quantileExactIf(0.5)(atencion_seg, estado_final = 'ATENDIDO' AND atencion_seg > 0) AS atencion_mediana_seg,
                    ifNotFinite(avg(tipo_atencion = 'PREFERENCIAL'), 0) AS p_preferencial,
-                   countIf(estado_final = 'ATENDIDO') AS muestras
+                   countIf(estado_final = 'ATENDIDO' AND atencion_seg > 0) AS muestras
             FROM cootep.hechos_turno FINAL
             WHERE agencia_id = {agencia:UUID} AND servicio_id = {servicio:UUID} AND franja = {franja:String}
             """,
@@ -105,7 +105,7 @@ class ClickHouseRepository:
                    countIf(estado_final = 'CANCELADO') AS cancelados,
                    countIf(estado_final = 'AUSENTE') AS ausentes,
                    ifNotFinite(round(avgIf(espera_seg, estado_final = 'ATENDIDO') / 60, 1), 0) AS espera_promedio_min,
-                   ifNotFinite(round(avgIf(atencion_seg, estado_final = 'ATENDIDO') / 60, 1), 0) AS atencion_promedio_min,
+                   ifNotFinite(round(avgIf(atencion_seg, estado_final = 'ATENDIDO' AND atencion_seg > 0) / 60, 1), 0) AS atencion_promedio_min,
                    ifNotFinite(round(avg(tipo_atencion = 'PREFERENCIAL'), 3), 0) AS proporcion_preferencial
             FROM cootep.hechos_turno FINAL
             WHERE agencia_id = {agencia:UUID} AND fecha BETWEEN {desde:Date} AND {hasta:Date}

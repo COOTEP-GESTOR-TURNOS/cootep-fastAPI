@@ -39,6 +39,12 @@ la semana y tipo de día); no usa machine learning.
 python -m app.scripts.medir_paralelismo --dias 120 --procesos 4
 ```
 
+## Duración de la atención
+
+`atencion_seg = 0` significa "sin medir". Pasa con los turnos que cerró el sistema porque nadie los
+finalizó (evento `TurnoCerradoPorSistema`): cuentan como atendidos, pero el promedio, la mediana t̄
+y su número de muestras los omiten.
+
 ## Ejecutar y probar
 
 ```bash
