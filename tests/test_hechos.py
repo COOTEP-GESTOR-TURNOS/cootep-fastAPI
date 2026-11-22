@@ -90,3 +90,17 @@ def test_cancelado_sin_llamada_se_mantiene_sin_asignacion():
     ]
     [hecho] = construir_hechos(((A, S), eventos))
     assert hecho["colaborador_id"] is None
+
+
+def test_atencion_cerrada_por_el_sistema_no_cuenta_su_duracion():
+    eventos = [
+        ("t1", "SOLICITADO", t(14, 0), "GENERAL", "WEB", "TurnoSolicitado", ASOCIADO),
+        ("t1", "LLAMADO", t(14, 12), "GENERAL", "WEB", "TurnoLlamado", COLABORADOR),
+        ("t1", "EN_ATENCION", t(14, 13), "GENERAL", "WEB", "TurnoEnAtencion", COLABORADOR),
+        ("t1", "ATENDIDO", t(22, 0), "GENERAL", "WEB", "TurnoCerradoPorSistema", None),
+    ]
+    [hecho] = construir_hechos(((A, S), eventos))
+    assert hecho["estado_final"] == "ATENDIDO"
+    assert hecho["espera_seg"] == 12 * 60
+    assert hecho["atencion_seg"] == 0
+    assert hecho["colaborador_id"] == COLABORADOR

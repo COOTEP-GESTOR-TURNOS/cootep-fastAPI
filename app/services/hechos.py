@@ -13,6 +13,8 @@ from app.config import ZONA_AGENCIAS
 from app.services.calendario import franja_de, tipo_dia
 
 FINALES = ("ATENDIDO", "CANCELADO", "AUSENTE")
+# Atención que nadie finalizó y cerró el backend: cuenta como atendida, pero su duración no es real.
+CIERRE_POR_SISTEMA = "TurnoCerradoPorSistema"
 TIPOS_CON_RESPONSABLE = {"TurnoLlamado", "TurnoEnAtencion", "TurnoAtendido", "TurnoAusente"}
 
 EventoCompacto = tuple[str, str, float, str, str] | tuple[str, str, float, str, str, str | None, str | None]
@@ -44,11 +46,14 @@ def construir_hechos(lote: Lote, incluir_pendientes: bool = False) -> list[dict]
         momentos = {}
         final = None
         colaborador = None
+        cerrado_por_sistema = False
         for evento in eventos_turno:
             estado, instante = evento[1:3]
             tipo, actor = evento[5:] if len(evento) == 7 else (None, None)
             if tipo == "TurnoConfirmado":
                 continue
+            if tipo == CIERRE_POR_SISTEMA:
+                cerrado_por_sistema = True
             momentos[estado] = instante
             if estado == "EN_ESPERA":
                 colaborador = None
@@ -64,7 +69,8 @@ def construir_hechos(lote: Lote, incluir_pendientes: bool = False) -> list[dict]
         inicio = momentos.get("EN_ATENCION")
         fin = momentos[final] if final else solicitado
         espera = (llamado if llamado is not None else fin) - solicitado
-        atencion = fin - inicio if (inicio is not None and final == "ATENDIDO") else 0.0
+        atencion_medida = inicio is not None and final == "ATENDIDO" and not cerrado_por_sistema
+        atencion = fin - inicio if atencion_medida else 0.0  # 0 = sin medir: los promedios lo omiten
         local = datetime.fromtimestamp(solicitado, ZONA_AGENCIAS)
         ultimo = eventos_turno[-1]
 
